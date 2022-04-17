@@ -1,0 +1,382 @@
+---
+title: "Building a Spam Filter with Naive Bayes"
+Author: "Sofiane Ikkour"
+output: html_document
+---
+
+#### **Context:**
+
+In this guided project, we're going to apply the Naive Bayes algorithm to build a spam filter for SMS messages.  
+
+To classify messages as spam or non-spam, we need to:  
+
+1. Provide a computer with information of what spam looks like and what non-spam looks like.
+2. The computer uses that knowledge to estimate probabilities for new messages - probabilities for spam and non-spam.
+3. Finally, the computer classifies a new message based on the values of probabilities calculated in step 2 - if the probability for a spam is greater, then it classifies the message as spam. Otherwise, it classifies it as non-spam. In cases where these probabilities are near-equal, we may want a human to classify the message. 
+
+#### **Goal:**
+
+Our project here is a machine learning problem, specifically a classification problem. The goal of our project is to maximize the predictive ability of our algorithm. 
+
+#### **Dataset:**  
+
+Our task is to provide a computer with information on how to classify messages. To do that, we'll use the Naive Bayses algorithm on a dataset of 5,572 messages that have already been classified by humans.
+
+This dataset can be downloaded from [The UCI Machine Learning Repository](https://archive.ics.uci.edu/ml/datasets/sms+spam+collection). For this project, I used a modified version of the dataset which contains fewer rows and is provided as an option to reduce code execution time. 
+
+Note that due to the nature of spam messages, the dataset contains content that may be offensive to some users. 
+
+**Note:** This code was written on RStudio.  
+**Language:** R.  
+**Packages:** readr, dplyr, stringr, purrr, tidyr.
+
+**Load and explore the dataset**
+
+```{r}
+# load the relevant libraries
+library(readr)
+library(dplyr)
+library(stringr)
+library(purrr)
+library(tidyr)
+
+# set the working directory
+setwd("C:/Users/Aylan/Documents/IT/DataQuest/R/Building a Spam Filter with Naive Bayses")
+
+# read the "spam.csv" dataset
+spam <- read_csv("spam.csv", col_types = cols())
+
+# display the first ten rows
+head(spam, 10)
+
+# print the number of rows and columns
+paste("The number of rows:", nrow(spam))
+paste("The number of columns:", ncol(spam))
+```
+
+**Observations:**  
+
+- The dataset contains 1000 rows and 2 columns.  
+- The column label has two labels, ham and spam.  
+
+Let's find what percentage of the messages is spam and what percentage is ham("ham means non-spam").
+
+```{r}
+# calculate the percentage of spam and ham messages
+spam_ham_percentage <- spam %>%
+  group_by(label) %>%
+  summarize(spam_ham_percentage = n() / nrow(spam) * 100)
+
+# display the spam_ham_percentage dataframe
+spam_ham_percentage
+```
+
+We can see that non-spam messages represent 85% of total messages while spam messages represent just 15%.
+
+**Split the dataset into training, validation and test sets**
+
+In this step, we'll divide our spam data into three distinct datasets:
+
+- A *training set*, which we'll use to train the computer how to classify messages.   
+- A *cross-validation set*, which we'll use to assess how different choices of alpha affect the prediction accuracy.  
+- a *test set*, which we'll use to test how good the spam filter is with classifying new messages.  
+
+We're going to keep 80% of our dataset for training, 10% for cross-validation and 10% for testing. We typically want to keep as much data as possible for training.  
+
+```{r}
+# set random state to 1
+set.seed(1)
+
+# calculate some values to split the dataset
+n <- nrow(spam)
+n_training <- 0.8 * n
+n_cv <- 0.1 * n
+n_test <- 0.1 * n
+
+# Create the random indices for training set
+train_indices <- sample(1:n, size = n_training, replace = FALSE)
+
+# Get indices not used by the training set
+remaining_indices <- setdiff(1:n, train_indices)
+
+# allocate remaining indices to cross-validation and test indices
+cv_indices <- remaining_indices[1:(length(remaining_indices)/2)]
+test_indices <- remaining_indices[((length(remaining_indices)/2) + 1):length(remaining_indices)]
+
+# use these randomized indices to create the training, cross-validation and test sets
+spam_train <- spam[train_indices,]
+spam_cv <- spam[cv_indices,]
+spam_test <- spam[test_indices,]
+
+# check if the ratios of ham to spam are relatively constant
+print(mean(spam_train$label == "ham"))
+print(mean(spam_cv$label == "ham"))
+print(mean(spam_test$label == "ham"))
+```
+
+The results above show that the cross_validation and test sets have at least one spam messages present in it. This is to make sure that our process of spam detection won't be compromised by the absence of spam messages in these sets.
+
+**Data cleaning:**
+
+Our next step is to teach the algorithm to classify new messages. The Naive Bayes algorithm is based on conditional probabilities. However, before calculating these probabilities, we need to clean the data first and convert it into a format that makes it easier to get the information we need.
+
+```{r}
+# let's begin the data cleaning process by removing the punctuation and bringing all the words to lower case
+tidy_train <- spam_train %>% 
+  mutate(
+    # Take the messages and remove unwanted characters
+    sms = str_to_lower(sms) %>% 
+      str_squish %>% 
+      str_replace_all("[[:punct:]]", "") %>% 
+      str_replace_all("[\u0094\u0092\u0096\n\t]", "") %>% # Unicode characters
+      str_replace_all("[[:digit:]]", "")
+  )
+```
+
+
+
+**Teach the algorithm to classify new messages**
+
+After removing the punctuation and and changing all the letters to lowercase, the next step we need to take is to create the vocabulary from the training set.  
+Then, we can start calculating the probabilities needed to do the classification. The Naive Bayes algorithm needs to know the values of the probabilities of the two equations below to classify new messages:
+
+![Naive Bayes equations](/Users/Aylan/Documents/IT/DataQuest/R/Building a Spam Filter with Naive Bayses/Naive Bayes equations.JPG)  
+
+To calculate P(wi|Spam) and P(wi|Ham) inside the formulas above, we need to use these equations:  
+
+![p_spam_ham](/Users/Aylan/Documents/IT/DataQuest/R/Building a Spam Filter with Naive Bayses/p_spam_ham.JPG)  
+
+```{r}
+# Creating the vocabulary
+vocabulary <- NULL
+messages <- tidy_train %>%  pull(sms)
+
+# Iterate through the messages and add to the vocabulary
+for (m in messages) {
+  words <- str_split(m, " ")[[1]]
+  vocabulary <- c(vocabulary, words)
+}
+
+# Remove duplicates from the vocabulary 
+vocabulary <- vocabulary %>% unique()
+# Isolate the spam and ham messages
+spam_messages <- tidy_train %>% 
+  filter(label == "spam") %>% 
+  pull(sms)
+
+ham_messages <- tidy_train %>% 
+  filter(label == "ham") %>% 
+  pull(sms)
+
+# Isolate the vocabulary in spam and ham messages
+spam_vocab <- NULL
+for (sm in spam_messages) {
+  words <- str_split(sm, " ")[[1]]
+  spam_vocab  <- c(spam_vocab, words)
+}
+spam_vocab
+
+ham_vocab <- NULL
+for (hm in ham_messages) {
+  words <- str_split(hm, " ")[[1]]
+  ham_vocab <- c(ham_vocab, words)
+}
+ham_vocab
+
+# Calculate some important parameters from the vocab
+n_spam <- spam_vocab %>% length()
+n_ham <- ham_vocab %>% length()
+n_vocabulary <- vocabulary %>% length()
+```
+
+Now, let's calculate the probabilities P(Spam) and P(Ham) from the training data.  
+
+```{r}
+# calculate p_spam and p_ham
+p_spam <- mean(tidy_train$label == "spam")
+p_ham <- mean(tidy_train$label == "ham")
+
+# isolate the spam words into a tibble
+# and then calculate the number of times each word appears in the spam messages
+spam_counts <- tibble(
+  word = spam_vocab
+) %>% 
+  mutate(
+    # Calculate the number of times a word appears in spam
+    spam_count = map_int(word, function(w) {
+      
+      # Count how many times each word appears in all spam messsages, then sum
+      map_int(spam_messages, function(sm) {
+        (str_split(sm, " ")[[1]] == w) %>% sum # for a single message
+      }) %>% 
+        sum # then summing over all messages
+      
+    })
+  )
+
+# isolate the ham words into a tibble
+# and then calculate the number of times each word appears in the ham messages
+ham_counts <- tibble(
+  word = ham_vocab
+) %>% 
+  mutate(
+    # Calculate the number of times a word appears in ham
+    ham_count = map_int(word, function(w) {
+      
+      # Count how many times each word appears in all ham messsages, then sum
+      map_int(ham_messages, function(hm) {
+        (str_split(hm, " ")[[1]] == w) %>% sum 
+      }) %>% 
+        sum
+      
+    })
+  )
+
+# join the two tibbles by the column word
+word_counts <- full_join(spam_counts, ham_counts, by = "word") %>% 
+  mutate(
+    # Fill in zeroes where there are missing values
+    spam_count = ifelse(is.na(spam_count), 0, spam_count),
+    ham_count = ifelse(is.na(ham_count), 0, ham_count)
+  )
+
+# display the first few rows of the df_word_counts dataframe
+head(word_counts, 10)
+```
+
+Now that we have all the word counts we need, we can create the probabilities needed to run the spam filter. To do that, we will create a function that takes in a new message and outputs a classification for the message.  
+
+```{r}
+# create a function to classify new messages
+classify <- function(message, alpha = 1) {
+  
+  # Splitting and cleaning the new message
+  # This is the same cleaning procedure used on the training messages
+  clean_message <- str_to_lower(message) %>% 
+    str_squish %>% 
+    str_replace_all("[[:punct:]]", "") %>% 
+    str_replace_all("[\u0094\u0092\u0096\n\t]", "") %>% # Unicode characters
+    str_replace_all("[[:digit:]]", "")
+  
+  words <- str_split(clean_message, " ")[[1]]
+  
+  # There is a possibility that there will be words that don't appear
+  # in the training vocabulary, so this must be accounted for
+  
+  # Find the words that aren't present in the training
+  new_words <- setdiff(vocabulary, words)
+  
+  # Add them to the word_counts 
+  new_word_probs <- tibble(
+    word = new_words,
+    spam_prob = 1,
+    ham_prob = 1
+  )
+  
+  # Filter down the probabilities to the words present 
+  # use group by to multiply everything together
+  present_probs <- word_counts %>% 
+    filter(word %in% words) %>% 
+    mutate(
+      # Calculate the probabilities from the counts
+      spam_prob = (spam_count + alpha) / (n_spam + alpha * n_vocabulary),
+      ham_prob = (ham_count + alpha) / (n_ham + alpha * n_vocabulary)
+    ) %>% 
+    bind_rows(new_word_probs) %>% 
+    pivot_longer(
+      cols = c("spam_prob", "ham_prob"),
+      names_to = "label",
+      values_to = "prob"
+    ) %>% 
+    group_by(label) %>% 
+    summarize(
+      wi_prob = prod(prob) # prod is like sum, but with multiplication
+    )
+  
+  # Calculate the conditional probabilities
+  p_spam_given_message <- p_spam * (present_probs %>% filter(label == "spam_prob") %>% pull(wi_prob))
+  p_ham_given_message <- p_ham * (present_probs %>% filter(label == "ham_prob") %>% pull(wi_prob))
+  
+  # Classify the message based on the probability
+  ifelse(p_spam_given_message >= p_ham_given_message, "spam", "ham")
+}
+
+# use the classification function to predict messages over the training data set
+final_train <- tidy_train %>% 
+  mutate(
+    prediction = map_chr(sms, function(m) { classify(m) })
+  ) 
+
+# display the first few rows of train_pred
+head(final_train)
+```
+
+```{r}
+# calculate the accuracy of the classifier's predictions
+# we use a confusion matrix
+confusion <- table(final_train$label, final_train$prediction)
+accuracy <- (confusion[1,1] + confusion[2,2]) / nrow(final_train)
+
+# print the accuracy
+print(accuracy)
+```
+
+The Naive Bayse classifier achieves an accuracy of 16%. It's a bad result.  
+Let's see how the algorithm works on the cross-validation and the test sets.
+
+```{r}
+# hyperparameter tuning
+alpha_grid <- seq(0.05, 1, by = 0.05)
+cv_accuracy <- NULL
+
+for (alpha in alpha_grid) {
+  
+  # Recalculate probabilities based on new alpha
+  cv_probs <- word_counts %>% 
+    mutate(
+      # Calculate the probabilities from the counts based on new alpha
+      spam_prob = (spam_count + alpha / (n_spam + alpha * n_vocabulary)),
+      ham_prob = (ham_count + alpha) / (n_ham + alpha * n_vocabulary)
+    )
+  
+  # Predict the classification of each message in cross validation
+  cv <- spam_cv %>% 
+    mutate(
+      prediction = map_chr(sms, function(m) { classify(m, alpha = alpha) })
+    ) 
+  
+  # Assess the accuracy of the classifier on cross-validation set
+  confusion <- table(cv$label, cv$prediction)
+  acc <- (confusion[1,1] + confusion[2,2]) / nrow(cv)
+  cv_accuracy <- c(cv_accuracy, acc)
+}
+
+# Check out what the best alpha value is
+tibble(
+  alpha = alpha_grid,
+  accuracy = cv_accuracy
+)
+```
+
+It seems that the accuracy doesn't change when alpha changes. The accuracy on the cross-validation set is 21%. Not good! 
+
+```{r}
+# test set
+# set alpha to 0.1
+test_alpha <- 0.1
+
+# perform predictions
+spam_test <- spam_test %>% 
+  mutate(
+    prediction = map_chr(sms, function(m) { classify(m, alpha = test_alpha)} )
+    )
+  
+confusion <- table(spam_test$label, spam_test$prediction)
+test_accuracy <- (confusion[1,1] + confusion[2,2]) / nrow(spam_test)
+test_accuracy
+```
+
+The accuracy on the test set is 18%.  
+The results obtained need to be improved.  
+One way we can achieve this is to investigate on the dataset and see if we can further clean it.   
+I'll come back to this project and work on how we can improve the accuracy of the algorithm.   
